@@ -23,5 +23,9 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            chmod +x /home/ubuntu/Addy-TheVoiceAssistant/deploy/deploy-backend.sh
-            /home/ubuntu/Addy-TheVoiceAssistant/deploy/deploy-backend.sh
+            cd /home/ubuntu/Addy-TheVoiceAssistant
+            git fetch origin
+            git checkout main
+            git reset --hard origin/main
+            chmod +x deploy/deploy-backend.sh
+            ./deploy/deploy-backend.sh
