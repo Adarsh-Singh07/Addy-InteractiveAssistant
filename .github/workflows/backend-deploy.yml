@@ -24,8 +24,14 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /home/ubuntu/Addy-TheVoiceAssistant
+            if [ ! -d ".git" ]; then
+              echo "Git repository not found. Initializing Git..."
+              git init
+              git remote add origin https://github.com/Adarsh-Singh07/Addy-InteractiveAssistant.git
+              git branch -M main
+            fi
             git fetch origin
-            git checkout main
+            git checkout -f main
             git reset --hard origin/main
             chmod +x deploy/deploy-backend.sh
             ./deploy/deploy-backend.sh
