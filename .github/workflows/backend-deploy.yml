@@ -1,0 +1,27 @@
+name: Deploy Backend to VPS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'deploy/**'
+      - '.github/workflows/backend-deploy.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy to VPS over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            chmod +x /home/ubuntu/Addy-TheVoiceAssistant/deploy/deploy-backend.sh
+            /home/ubuntu/Addy-TheVoiceAssistant/deploy/deploy-backend.sh

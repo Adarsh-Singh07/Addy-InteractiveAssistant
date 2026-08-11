@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="description" content="Addy — Adarsh's personal AI voice assistant. Private, fast, multilingual." />
+  <meta name="theme-color" content="#090c14" />
+  <title>Addy — Voice Assistant</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="css/main.css" />
+</head>
+<body>
+
+<div class="app" role="main">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="brand-logo" aria-hidden="true">⚡</div>
+      <span class="brand-name">Addy</span>
+    </div>
+    <div class="header-actions">
+      <button id="admin-toggle-btn" class="admin-toggle-btn" aria-label="Unlock administrator mode">🔑 Lock/Unlock</button>
+      <div id="connection-badge" class="connection-badge" role="status" aria-live="polite">
+        <div class="connection-dot" id="conn-dot"></div>
+        <span id="conn-label">Connecting…</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Character Banner -->
+  <div class="character-display">
+    <h1 id="active-char-name">Addy</h1>
+    <p id="active-char-desc">Adarsh's AI Twin</p>
+  </div>
+
+  <!-- Central Immersive Orb Visualizer -->
+  <div class="visualizer-container">
+    <canvas id="orb-canvas" width="250" height="250" aria-hidden="true"></canvas>
+    <div class="status-overlay">
+      <span id="status-value" class="status-value idle">Ready</span>
+    </div>
+  </div>
+
+  <!-- Live Transcript Container -->
+  <div class="live-transcript-container" id="transcript-container">
+    <div class="live-transcript-interim" id="interim-text"></div>
+    <div class="live-transcript-scroll" id="transcript-scroll" role="log" aria-live="polite">
+      <!-- Conversation history fades here -->
+    </div>
+  </div>
+
+  <!-- Mic Action Button -->
+  <section class="action-center">
+    <button
+      id="mic-btn"
+      class="mic-btn"
+      aria-label="Tap to speak with Addy"
+      aria-pressed="false"
+    >
+      <span class="mic-icon" id="mic-icon">🎙️</span>
+    </button>
+    <p class="mic-hint" id="mic-hint">Tap the mic to start conversation</p>
+  </section>
+
+  <!-- Config Panel -->
+  <div class="selectors-panel">
+    <!-- Character selector -->
+    <div class="selector-group">
+      <label>Persona</label>
+      <div class="segmented-control">
+        <button class="seg-btn active" id="btn-char-addy" data-char="addy">Addy</button>
+        <button class="seg-btn" id="btn-char-nova" data-char="nova">Nova</button>
+        <button class="seg-btn" id="btn-char-atlas" data-char="atlas">Atlas</button>
+      </div>
+    </div>
+    <!-- Model selector -->
+    <div class="selector-group">
+      <label>Voice Model</label>
+      <div class="segmented-control">
+        <button class="seg-btn active" id="btn-model-31" data-model="gemini-2.5-flash">Gemini 2.5 Live</button>
+        <button class="seg-btn" id="btn-model-25" data-model="gemini-2.5-flash-native-audio-preview-12-2025">Gemini 2.5 Live Legacy</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin Login Modal -->
+  <div id="admin-login-modal" class="admin-modal hidden" aria-modal="true" role="dialog">
+    <div class="admin-modal-content">
+      <button id="admin-modal-close" class="admin-close-btn" aria-label="Close modal">&times;</button>
+      <h2>System Access</h2>
+      <p>Enter administrator passcode to unlock private assistant Atlas and control Hermes workflows.</p>
+      <input type="password" id="admin-passcode-input" placeholder="Passcode" aria-label="Passcode input" />
+      <button id="admin-submit-btn" class="admin-submit-btn">Authorize</button>
+      <div id="admin-login-error" class="admin-error hidden"></div>
+    </div>
+  </div>
+
+  <!-- Advanced Settings Dropdown -->
+  <details class="settings-card">
+    <summary class="settings-header">⚙️ Advanced Live Configuration</summary>
+    <div class="settings-body">
+      <div class="setting-row">
+        <label for="voice-select">Prebuilt Live Voice</label>
+        <select id="voice-select">
+          <option value="Aoede">Aoede (Female - Addy/Nova default)</option>
+          <option value="Charon">Charon (Male - Atlas default)</option>
+          <option value="Kore">Kore (Female)</option>
+          <option value="Puck">Puck (Male)</option>
+          <option value="Fenrir">Fenrir (Male)</option>
+        </select>
+      </div>
+      <div class="setting-row" id="row-thinking-level">
+        <label for="thinking-level-select">Thinking Budget (3.1+)</label>
+        <select id="thinking-level-select">
+          <option value="minimal">Minimal</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
+      <div class="setting-row" id="row-affective">
+        <label for="affective-checkbox">Affective Dialogue (2.5+)</label>
+        <label class="switch">
+          <input type="checkbox" id="affective-checkbox" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <label for="engine-select">Voice Pipeline Mode</label>
+        <select id="engine-select">
+          <option value="gemini_live">Gemini Live API (Primary)</option>
+          <option value="cascaded">Deepgram Cascaded (Fallback)</option>
+        </select>
+      </div>
+    </div>
+  </details>
+
+
+  <!-- Controls Action Bar -->
+  <nav class="controls" aria-label="Session controls">
+    <button id="btn-mute" class="ctrl-btn" aria-label="Mute microphone">
+      🔇 Mute
+    </button>
+    <button id="btn-interrupt" class="ctrl-btn" aria-label="Interrupt current response">
+      ✋ Interrupt
+    </button>
+    <button id="btn-clear" class="ctrl-btn danger" aria-label="Clear conversation">
+      🗑️ Clear
+    </button>
+  </nav>
+
+  <!-- Latency / Benchmarking metrics -->
+  <div class="latency-bar" id="latency-bar" aria-label="Response latency">
+    <div class="metrics-grid">
+      <div class="metric-item">E2E: <span id="latency-e2e">—</span>ms</div>
+      <div class="metric-item">STT/VAD: <span id="latency-stt">—</span>ms</div>
+      <div class="metric-item">LLM: <span id="latency-llm">—</span>ms</div>
+      <div class="metric-item">TTS: <span id="latency-tts">—</span>ms</div>
+    </div>
+  </div>
+
+  <!-- Provider Status strip -->
+  <div class="provider-strip" aria-label="Active providers" id="provider-strip"></div>
+
+</div><!-- /.app -->
+
+<!-- Scripts -->
+<script src="js/config.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/voice.js"></script>
+
+</body>
+</html>

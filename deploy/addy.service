@@ -1,0 +1,14 @@
+[Unit]
+Description=Addy Voice Agent Service
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Addy-TheVoiceAssistant/backend
+ExecStart=/home/ubuntu/Addy-TheVoiceAssistant/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=5
+Environment=PYTHONPATH=.
+
+[Install]
+WantedBy=multi-user.target
