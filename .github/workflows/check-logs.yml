@@ -1,0 +1,24 @@
+name: Check VPS Logs
+
+on:
+  push:
+    branches:
+      - check-logs
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch logs from VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            echo "=== SYSTEMD JOURNAL LOGS ==="
+            sudo journalctl -u addy -n 100 --no-pager
+            echo "=== NGINX ERROR LOGS ==="
+            sudo tail -n 50 /var/log/nginx/error.log
+            echo "=== NGINX ACCESS LOGS ==="
+            sudo tail -n 50 /var/log/nginx/access.log
