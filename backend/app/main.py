@@ -1,5 +1,6 @@
 """
 FastAPI application factory.
+# Triggering auto-deploy via GitHub Actions
 
 Startup sequence:
 1. Load settings from environment
