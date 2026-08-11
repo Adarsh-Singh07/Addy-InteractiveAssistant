@@ -26,7 +26,7 @@ let agentState = 'idle'; // idle | listening | thinking | speaking | interrupted
 
 // Active parameters
 let selectedCharacter = 'addy';
-let selectedModel = 'gemini-2.5-flash';
+let selectedModel = 'gemini-3.1-flash-live-preview';
 let selectedVoice = 'Aoede';
 let selectedThinkingLevel = 'minimal';
 let selectedAffective = false;
