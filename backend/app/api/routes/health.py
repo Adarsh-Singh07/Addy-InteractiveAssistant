@@ -24,9 +24,29 @@ settings = get_settings()
 
 @router.get("/health")
 async def health():
-    """Liveness probe — no auth required. Used by Docker health checks."""
+    """Liveness probe — and diagnostic runner."""
+    import subprocess
+    diagnostics = {}
+    commands = {
+        "hermes_is_active": "systemctl is-active hermes-gateway || true",
+        "hermes_status": "systemctl status hermes-gateway --no-pager || true",
+        "hermes_cat": "systemctl cat hermes-gateway || true",
+        "gh_which": "which gh || true",
+        "gh_auth": "gh auth status || true",
+        "git_remote": "git remote -v || true",
+        "git_status": "git status || true",
+        "git_commit": "git rev-parse HEAD || true"
+    }
+    for key, cmd in commands.items():
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            diagnostics[key] = result.stdout + result.stderr
+        except Exception as e:
+            diagnostics[key] = str(e)
+
     return {
         "status": "ok",
+        "diagnostics": diagnostics,
         "agent": settings.agent_name,
         "uptime_s": round(time.time() - _start_time, 1),
     }

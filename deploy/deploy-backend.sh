@@ -48,6 +48,11 @@ fi
 echo "Restarting addy.service..."
 sudo systemctl restart addy.service
 
+# Update Nginx Configuration
+echo "Updating Nginx configuration..."
+sudo cp "$PROJECT_DIR/deploy/nginx/api.adarshsingh.in.conf" /etc/nginx/sites-available/
+sudo systemctl reload nginx
+
 # Wait and perform health check
 echo "Waiting for service to start..."
 sleep 3
