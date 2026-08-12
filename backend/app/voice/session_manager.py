@@ -99,6 +99,10 @@ class LiveSessionManager:
         self._current_latency: TurnLatency | None = None
         self._recent_transcript: list[str] = []
 
+        # Generational Architecture
+        self._session_generation = 0
+        self._handoff_state = "IDLE" # IDLE | REQUESTED | STOPPING_OLD | STARTING_NEW | READY | FAILED
+
         # Rollover flag
         self._rollover_requested = asyncio.Event()
 
@@ -168,10 +172,37 @@ class LiveSessionManager:
 
                 async with self._provider.connect(self._model, config) as session:
                     self._gemini_session = session
-                    log.info("Gemini Live connected", session_id=self.session_id)
+                    log.info("Gemini Live connected", session_id=self.session_id, generation=self._session_generation)
+
+                    # State: ready
+                    if self._handoff_state in ("STARTING_NEW", "REQUESTED"):
+                        self._handoff_state = "READY"
+                        await self._transport.send_event(
+                            "character_shift",
+                            {
+                                "character": self._character.character_id,
+                                "voice": self._voice,
+                                "display_name": self._character.display_name,
+                                "color": _PERSONA_COLOR.get(self._character.character_id, "cyan"),
+                                "status": "ready"
+                            }
+                        )
+                        self._handoff_state = "IDLE"
+                    else:
+                        await self._transport.send_event(
+                            "character_shift",
+                            {
+                                "character": self._character.character_id,
+                                "voice": self._voice,
+                                "display_name": self._character.display_name,
+                                "color": _PERSONA_COLOR.get(self._character.character_id, "cyan"),
+                                "status": "ready"
+                            }
+                        )
+
 
                     self._gemini_task = asyncio.create_task(
-                        self._read_gemini_loop(), name=f"gemini_{self.session_id}"
+                        self._read_gemini_loop(self._session_generation), name=f"gemini_{self.session_id}_{self._session_generation}"
                     )
                     self._rollover_task = asyncio.create_task(
                         self._session_rollover_loop(), name=f"rollover_{self.session_id}"
@@ -186,9 +217,13 @@ class LiveSessionManager:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
 
-                    for task in pending:
-                        task.cancel()
-                    if not self._rollover_task.done():
+                    # Only cancel Gemini-specific tasks during rollover.
+                    # We MUST NOT cancel _client_task or _audio_sender_task here, otherwise the WS drops.
+                    if self._gemini_task and not self._gemini_task.done():
+                        self._gemini_task.cancel()
+                    if self._rollover_waiter_task and not self._rollover_waiter_task.done():
+                        self._rollover_waiter_task.cancel()
+                    if self._rollover_task and not self._rollover_task.done():
                         self._rollover_task.cancel()
 
                     self._gemini_session = None
@@ -207,10 +242,21 @@ class LiveSessionManager:
 
             except Exception as exc:
                 log.error("Gemini connect error", session_id=self.session_id, error=str(exc))
+                self._handoff_state = "FAILED"
                 await self._transport.send_event("error", {"message": f"Connection error: {exc}"})
-                if self._client_task.done():
+                
+                await self._transport.send_event(
+                    "character_shift",
+                    {
+                        "character": self._character.character_id,
+                        "status": "error"
+                    }
+                )
+
+                if self._client_task and self._client_task.done():
                     break
                 await asyncio.sleep(2)
+                self._handoff_state = "IDLE"
                 continue
 
         # Signal audio sender to stop
@@ -312,7 +358,7 @@ class LiveSessionManager:
 
     # ── Gemini Read Loop ──────────────────────────────────────────────────
 
-    async def _read_gemini_loop(self) -> None:
+    async def _read_gemini_loop(self, generation: int) -> None:
         """
         Consume all events from the Gemini Live session.
 
@@ -322,20 +368,26 @@ class LiveSessionManager:
         if self._gemini_session is None:
             return
 
-        log.debug("Gemini receive loop started", session_id=self.session_id)
+        log.debug("Gemini receive loop started", session_id=self.session_id, generation=generation)
         try:
             while True:
                 got_any = False
                 async for response in self._gemini_session.receive():
+                    if generation != self._session_generation:
+                        log.info("Discarding stale event from old generation", event="receive", old_gen=generation, current_gen=self._session_generation)
+                        break # exit inner loop
                     got_any = True
                     if response.server_content is not None:
-                        await self._handle_server_content(response.server_content)
+                        await self._handle_server_content(response.server_content, generation)
                     elif response.tool_call is not None:
-                        await self._handle_tool_call(response.tool_call)
+                        await self._handle_tool_call(response.tool_call, generation)
+                
+                if generation != self._session_generation:
+                    break # exit outer loop
 
                 if not got_any:
                     # receive() returned immediately with nothing — session closed
-                    log.info("Gemini session closed (receive returned empty)", session_id=self.session_id)
+                    log.info("Gemini session closed (receive returned empty)", session_id=self.session_id, generation=generation)
                     break
 
                 # Turn ended — loop back to receive next turn
@@ -343,16 +395,19 @@ class LiveSessionManager:
                 await asyncio.sleep(0)
 
         except asyncio.CancelledError:
-            log.debug("Gemini receive loop cancelled", session_id=self.session_id)
+            log.debug("Gemini receive loop cancelled", session_id=self.session_id, generation=generation)
         except Exception as exc:
-            log.error("Gemini receive loop error", session_id=self.session_id, error=str(exc))
+            log.error("Gemini receive loop error", session_id=self.session_id, error=str(exc), generation=generation)
             await self._transport.send_event("error", {"message": f"Stream error: {exc}"})
             raise
 
-        log.info("Gemini receive loop ended", session_id=self.session_id)
+        log.info("Gemini receive loop ended", session_id=self.session_id, generation=generation)
 
-    async def _handle_server_content(self, content: Any) -> None:
+    async def _handle_server_content(self, content: Any, generation: int) -> None:
         """Dispatch a server_content event from Gemini."""
+        if generation != self._session_generation:
+             log.info("Discarding stale server_content", old_gen=generation, current_gen=self._session_generation)
+             return
 
         # 1. Barge-in: server detected user spoke over the model
         if content.interrupted:
@@ -391,18 +446,10 @@ class LiveSessionManager:
                     if self._current_latency and not self._current_latency.tts_first_audio_ts:
                         self._current_latency.tts_first_audio_ts = time.time()
                         self._current_latency.client_audio_sent_ts = time.time()
-                    # Queue audio with bounded wait to prevent silent drops on fast Gemini responses
-                    try:
-                        await asyncio.wait_for(
-                            self._audio_queue.put(part.inline_data.data),
-                            timeout=1.0,
-                        )
-                    except asyncio.TimeoutError:
-                        log.warning(
-                            "audio_queue_full — chunk dropped after 1s wait",
-                            session_id=self.session_id,
-                            queue_size=self._audio_queue.qsize(),
-                        )
+                    # Queue audio with backpressure. We await infinitely to ensure
+                    # chunks are not dropped during fast Gemini generations.
+                    # Bounded queue size (_AUDIO_QUEUE_SIZE) handles the backpressure naturally.
+                    await self._audio_queue.put(part.inline_data.data)
 
                 if part.text:
                     self._recent_transcript.append(part.text)
@@ -446,9 +493,9 @@ class LiveSessionManager:
                 metrics.record_turn(self._current_latency)
                 self._current_latency = None
 
-    async def _handle_tool_call(self, tool_call: Any) -> None:
+    async def _handle_tool_call(self, tool_call: Any, generation: int) -> None:
         """Execute real tools and return results to Gemini."""
-        if self._gemini_session is None:
+        if self._gemini_session is None or generation != self._session_generation:
             return
         from app.voice.tool_registry import execute_tool
         for call in tool_call.function_calls:
@@ -459,6 +506,10 @@ class LiveSessionManager:
                 # Check for agent handoff
                 if result.get("action") == "TRANSFER" and result.get("target"):
                     await self.perform_handoff(result["target"])
+
+                # If generation changed during tool execution (e.g., handoff), discard response
+                if generation != self._session_generation:
+                    return
 
                 resp = types.LiveClientToolResponse(
                     function_responses=[
@@ -475,6 +526,10 @@ class LiveSessionManager:
 
     async def perform_handoff(self, target: str) -> None:
         """Dynamically switches the active character profile (prompt and voice) in-place."""
+        if self._handoff_state != "IDLE":
+             log.warning("Handoff rejected — another handoff is in progress", target=target)
+             return
+             
         if not is_character_allowed(target, self._access_mode):
             log.warning(
                 "Handoff rejected — character restricted in this access mode",
@@ -483,12 +538,25 @@ class LiveSessionManager:
             )
             return
 
+        self._handoff_state = "REQUESTED"
         log.info("handoff_started", target=target, session_id=self.session_id)
+        
+        # Mark old generation retiring
+        self._session_generation += 1
+        
+        # Clear old-generation audio safely to prevent stale audio from playing
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+                self._audio_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+                
         new_char = CharacterManager().get_character(target)
         self._character = new_char
         self._voice = new_char.voice
 
-        # Notify the frontend to shift theme, orb color, and UI labels
+        # Notify the frontend to show "Connecting to [Persona]..." but do not switch UI completely yet
         await self._transport.send_event(
             "character_shift",
             {
@@ -496,12 +564,14 @@ class LiveSessionManager:
                 "voice": new_char.voice,
                 "display_name": new_char.display_name,
                 "color": _PERSONA_COLOR.get(target, "cyan"),
+                "status": "starting"
             },
         )
 
+        self._handoff_state = "STARTING_NEW"
         # Trigger session rollover to reconnect with new system prompt and voice
         self._rollover_requested.set()
-        log.info("handoff_completed", target=target, session_id=self.session_id)
+        log.info("handoff_requested", target=target, session_id=self.session_id)
 
 
     # ── Dynamic Configuration Update ──────────────────────────────────────
@@ -512,8 +582,12 @@ class LiveSessionManager:
 
         char_id = payload.get("character")
         if char_id and char_id != self._character.character_id:
-            self._character = CharacterManager().get_character(char_id)
-            changed = True
+            if not is_character_allowed(char_id, self._access_mode):
+                log.warning("Settings update rejected — character restricted", target=char_id, mode=self._access_mode)
+            else:
+                self._character = CharacterManager().get_character(char_id)
+                self._voice = self._character.voice
+                changed = True
 
         model = payload.get("model")
         if model and model != self._model:

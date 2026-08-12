@@ -61,6 +61,11 @@ const VAD_SILENCE_THRESHOLD = 0.012;// RMS below = silence
 const VAD_SILENCE_FRAMES_END = 18;  // ~18×128ms = ~2.3s silence → activity_end
                                      // Lower = faster STT, higher = catches trailing words
 
+// Local VAD state for Echo-Aware Barge-In
+const PRE_ROLL_MAX_FRAMES = 5; // ~640ms at 2048 samples / 16kHz
+let preRollBuffer = [];
+let localBargeInActive = false;
+
 // AudioPlayer instance
 window.audioPlayer = new AudioPlayer();
 
@@ -211,8 +216,25 @@ function handleServerEvent(event) {
 
   switch (event.type) {
     case 'status': {
-      // Backend sends flat: {type: 'status', state: 'listening'} (no payload wrapper)
+      // Backend sends flat: {type: 'status', state: 'listening', character: '...'}
       const st = event.state || event.payload?.state || 'idle';
+      const char = event.character || event.payload?.character;
+      
+      // Enforce backend authoritative character state
+      if (char && char !== selectedCharacter) {
+        selectedCharacter = char;
+        const nameEl = document.getElementById('active-char-name');
+        if (nameEl) nameEl.textContent = char.charAt(0).toUpperCase() + char.slice(1);
+        
+        ['addy', 'nova', 'atlas'].forEach(c => {
+          const el = document.getElementById(`btn-char-${c}`);
+          if (el) el.classList.toggle('active', c === char);
+        });
+        document.body.classList.remove('persona-nova', 'persona-atlas');
+        if (char === 'nova')  document.body.classList.add('persona-nova');
+        if (char === 'atlas') document.body.classList.add('persona-atlas');
+      }
+
       setStatus(st, st.charAt(0).toUpperCase() + st.slice(1));
       break;
     }
@@ -248,39 +270,39 @@ function handleServerEvent(event) {
       const target = event.character || event.payload?.character || 'addy';
       const voice  = event.voice   || event.payload?.voice   || 'Aoede';
       const color  = event.color   || event.payload?.color   || 'cyan';
-      logInfo(`character_shift: ${selectedCharacter} → ${target} (voice: ${voice}, color: ${color})`);
+      const status = event.status  || event.payload?.status  || 'ready';
+      logInfo(`character_shift: ${selectedCharacter} → ${target} (status: ${status})`);
 
-      // Update local state
-      selectedCharacter = target;
-      selectedVoice     = voice;
-      if (voiceSelect) voiceSelect.value = voice;
+      if (status === 'starting') {
+        // Apply persona body class for CSS color transition
+        document.body.classList.remove('persona-nova', 'persona-atlas');
+        if (target === 'nova')  document.body.classList.add('persona-nova');
+        if (target === 'atlas') document.body.classList.add('persona-atlas');
+        
+        const displayName = target.charAt(0).toUpperCase() + target.slice(1);
+        setStatus('connecting', `Connecting to ${displayName}…`);
+      } else if (status === 'ready') {
+        // Update local state ONLY when backend says ready
+        selectedCharacter = target;
+        selectedVoice     = voice;
+        if (voiceSelect) voiceSelect.value = voice;
 
-      // Update character display
-      const nameEl = document.getElementById('active-char-name');
-      const descEl = document.getElementById('active-char-desc');
-      if (nameEl) nameEl.textContent = target.charAt(0).toUpperCase() + target.slice(1);
-      if (descEl) descEl.textContent = getCharacterDesc(target);
+        // Update character display
+        const nameEl = document.getElementById('active-char-name');
+        const descEl = document.getElementById('active-char-desc');
+        if (nameEl) nameEl.textContent = target.charAt(0).toUpperCase() + target.slice(1);
+        
+        // Update persona tab active states
+        ['addy', 'nova', 'atlas'].forEach(c => {
+          const el = document.getElementById(`btn-char-${c}`);
+          if (el) el.classList.toggle('active', c === target);
+        });
+        
+        setStatus('listening', 'Ready');
+      } else if (status === 'error') {
+        setStatus('error', `Failed to connect to ${target}`);
+      }
 
-      // Update persona tab active states
-      ['addy', 'nova', 'atlas'].forEach(c => {
-        const el = document.getElementById(`btn-char-${c}`);
-        if (el) el.classList.toggle('active', c === target);
-      });
-
-      // Apply persona body class for CSS color transition (800ms)
-      document.body.classList.remove('persona-nova', 'persona-atlas');
-      if (target === 'nova')  document.body.classList.add('persona-nova');
-      if (target === 'atlas') document.body.classList.add('persona-atlas');
-
-      // Show transition status
-      const displayName = target.charAt(0).toUpperCase() + target.slice(1);
-      setStatus('connecting', `Connecting to ${displayName}…`);
-
-      // Trigger a backend session rollover for the new persona (with new voice)
-      // Short delay to let the handoff sentence audio finish playing
-      setTimeout(() => {
-        sendSettingsUpdate();
-      }, 900);
       break;
     }
 
@@ -360,8 +382,11 @@ async function startListening() {
         // These tell Gemini exactly when the user starts and stops talking,
         // eliminating the 2-3s silence wait for automatic turn detection.
         const rms = computeRMS(inputData);
+        let shouldSendAudio = true;
 
         if (!agentState || agentState === 'listening' || agentState === 'idle') {
+          localBargeInActive = false;
+          preRollBuffer = [];
           if (!vadUserSpeaking && rms > VAD_SPEECH_THRESHOLD) {
             // User just started speaking
             vadUserSpeaking = true;
@@ -384,19 +409,61 @@ async function startListening() {
               vadSilenceFrames = 0; // Reset on speech resumption
             }
           }
-        } else {
-          // Agent is speaking — check for barge-in
-          detectBargeIn(rms);
+        } else if (agentState === 'speaking' || agentState === 'thinking') {
+          // Agent is active. Prevent speaker echo from triggering Gemini VAD.
+          const playbackVol = window.audioPlayer ? window.audioPlayer.getPlaybackVolume() : 0;
+          
+          if (!localBargeInActive) {
+            // Configurable thresholds for barge-in detection
+            const MIN_BARGE_IN_RMS = 0.02; // Minimum RMS to consider as speech
+            const ECHO_MULTIPLIER = 1.5;   // Mic RMS must be higher than 1.5x the playback RMS
+            
+            if (rms > MIN_BARGE_IN_RMS && rms > playbackVol * ECHO_MULTIPLIER) {
+               // Real user speech detected over speaker echo!
+               logInfo(`Local VAD detected barge-in! Mic RMS: ${rms.toFixed(3)}, Playback Vol: ${playbackVol.toFixed(3)}`);
+               localBargeInActive = true;
+               
+               // Flush the pre-roll buffer to Gemini to capture the start of the user's speech
+               if (ws && ws.readyState === WebSocket.OPEN) {
+                  for (const frame of preRollBuffer) {
+                     ws.send(frame.buffer);
+                  }
+               }
+               preRollBuffer = [];
+            } else {
+               // Not speech, likely just echo or silence. Suppress audio to Gemini.
+               shouldSendAudio = false;
+               
+               // Save PCM to pre-roll
+               const pcmBuffer = new Int16Array(inputData.length);
+               for (let i = 0; i < inputData.length; i++) {
+                 const sample = Math.max(-1, Math.min(1, inputData[i]));
+                 pcmBuffer[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+               }
+               preRollBuffer.push(pcmBuffer);
+               if (preRollBuffer.length > PRE_ROLL_MAX_FRAMES) {
+                  preRollBuffer.shift();
+               }
+            }
+          }
         }
 
         // ── Send raw PCM bytes to backend ──────────────────────────────
-        const pcmBuffer = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          const sample = Math.max(-1, Math.min(1, inputData[i]));
-          pcmBuffer[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-        }
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(pcmBuffer.buffer);
+        if (shouldSendAudio) {
+           const pcmBuffer = new Int16Array(inputData.length);
+           for (let i = 0; i < inputData.length; i++) {
+             const sample = Math.max(-1, Math.min(1, inputData[i]));
+             pcmBuffer[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+           }
+           if (ws && ws.readyState === WebSocket.OPEN) {
+             ws.send(pcmBuffer.buffer);
+           }
+        } else {
+           // Send pure silence (zeros) to keep Gemini timestamp advancing without triggering VAD
+           const pcmBuffer = new Int16Array(inputData.length); // initialized to 0
+           if (ws && ws.readyState === WebSocket.OPEN) {
+             ws.send(pcmBuffer.buffer);
+           }
         }
       };
 
@@ -487,18 +554,9 @@ function computeRMS(float32Samples) {
 // Called with pre-computed RMS when agent is speaking.
 // Only stops local audio — Gemini handles the actual interruption server-side.
 function detectBargeIn(rms) {
-  if (!window.audioPlayer.isPlaying) return;
-
-  const now = Date.now();
-  if (now - lastInterruptTime < INTERRUPT_COOLDOWN_MS) return;
-
-  if (rms > VAD_SPEECH_THRESHOLD) {
-    logInfo(`Barge-in detected (RMS: ${rms.toFixed(4)}). Stopping local playback.`);
-    lastInterruptTime = now;
-    window.audioPlayer.stop();
-    vadUserSpeaking = false;
-    vadSilenceFrames = 0;
-  }
+  // Disabling local audio cutoff to prevent false positives from speaker echo.
+  // Gemini's server-side barge-in detection (interrupted event) is the authoritative source.
+  return;
 }
 
 function triggerInterrupt() {
@@ -597,11 +655,11 @@ function setupEventListeners() {
 
   // Persona buttons
   btnCharAddy.addEventListener('click', () => {
-    selectCharacterPreset('addy');
+    requestCharacterShift('addy');
   });
 
   btnCharNova.addEventListener('click', () => {
-    selectCharacterPreset('nova');
+    requestCharacterShift('nova');
   });
 
   btnCharAtlas.addEventListener('click', () => {
@@ -610,7 +668,7 @@ function setupEventListeners() {
       adminLoginModal.classList.remove('hidden');
       adminPasscodeInput.focus();
     } else {
-      selectCharacterPreset('atlas');
+      requestCharacterShift('atlas');
     }
   });
 
@@ -907,37 +965,32 @@ function reconnect() {
   connectWebSocket();
 }
 
-function selectCharacterPreset(char) {
-  selectedCharacter = char;
-
-  // Set correct default voices per persona
-  if (char === 'atlas') {
-    selectedVoice = 'Charon';
-  } else if (char === 'nova') {
-    selectedVoice = 'Kore';  // Nova uses Kore, distinct from Addy's Aoede
+function requestCharacterShift(char) {
+  if (char === selectedCharacter) return;
+  
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'settings',
+      payload: {
+        character: char
+      }
+    }));
   } else {
-    selectedVoice = 'Aoede'; // Addy default
+    // If not connected, we can just set the character locally and connect
+    selectedCharacter = char;
+    if (char === 'atlas') selectedVoice = 'Charon';
+    else if (char === 'nova') selectedVoice = 'Kore';
+    else selectedVoice = 'Aoede';
+    if (voiceSelect) voiceSelect.value = selectedVoice;
+    
+    // update tabs
+    ['addy', 'nova', 'atlas'].forEach(c => {
+      const el = document.getElementById(`btn-char-${c}`);
+      if (el) el.classList.toggle('active', c === char);
+    });
+    
+    connectWebSocket();
   }
-  if (voiceSelect) voiceSelect.value = selectedVoice;
-
-  // Update character display labels
-  const nameEl = document.getElementById('active-char-name');
-  const descEl = document.getElementById('active-char-desc');
-  if (nameEl) nameEl.textContent = char.charAt(0).toUpperCase() + char.slice(1);
-  if (descEl) descEl.textContent = getCharacterDesc(char);
-
-  // Update persona tab active states
-  ['addy', 'nova', 'atlas'].forEach(c => {
-    const el = document.getElementById(`btn-char-${c}`);
-    if (el) el.classList.toggle('active', c === char);
-  });
-
-  // Apply persona body class for CSS color transition
-  document.body.classList.remove('persona-nova', 'persona-atlas');
-  if (char === 'nova')  document.body.classList.add('persona-nova');
-  if (char === 'atlas') document.body.classList.add('persona-atlas');
-
-  reconnect();
 }
 
 async function checkAdminStatus() {
@@ -992,8 +1045,14 @@ async function performAdminLogin() {
         adminLoginError.classList.add('hidden');
         adminPasscodeInput.value = '';
 
-        // Switch to Atlas automatically
-        selectCharacterPreset('atlas');
+        // Reconnect WS to pick up the new authenticated cookie for Admin access mode
+        if (ws) {
+          ws.close();
+        }
+        setTimeout(() => connectWebSocket(), 100);
+
+        // Switch to Atlas automatically once connected
+        setTimeout(() => requestCharacterShift('atlas'), 1000);
       }
     } else {
       const errData = await resp.json();
@@ -1020,8 +1079,14 @@ async function logoutAdmin() {
       const atlasBtn = document.getElementById('btn-char-atlas');
       if (atlasBtn) atlasBtn.setAttribute('hidden', '');
 
+      // Reconnect WS to drop Admin access mode
+      if (ws) {
+        ws.close();
+      }
+      setTimeout(() => connectWebSocket(), 100);
+
       // Fallback to Addy
-      selectCharacterPreset('addy');
+      setTimeout(() => requestCharacterShift('addy'), 1000);
     }
   } catch (err) {
     console.error('Logout error:', err);

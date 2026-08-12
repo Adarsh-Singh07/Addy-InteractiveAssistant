@@ -66,7 +66,7 @@ async def login(request: LoginRequest, response: Response):
         key=COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=True,
+        secure=settings.app_env == "production",
         samesite="lax",
         max_age=3600 * 24,  # 24 hours
     )
