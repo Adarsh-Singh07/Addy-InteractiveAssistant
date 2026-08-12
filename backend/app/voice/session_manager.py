@@ -31,6 +31,13 @@ from app.voice.permission_matrix import AccessMode, is_character_allowed
 log = get_logger(__name__)
 metrics = get_metrics()
 
+# Persona color map — forwarded to frontend for orb color transitions
+_PERSONA_COLOR: dict[str, str] = {
+    "addy": "cyan",
+    "nova": "violet",
+    "atlas": "amber",
+}
+
 # Audio MIME type for send_realtime_input — rate suffix causes rejection
 _AUDIO_MIME = "audio/pcm"
 
@@ -143,6 +150,7 @@ class LiveSessionManager:
                     user_name=self._settings.user_name,
                     agent_name=self._settings.agent_name,
                     timezone=self._settings.user_timezone,
+                    access_context="admin" if self._access_mode == AccessMode.ADMIN else "public",
                 )
                 from app.voice.tool_registry import get_live_tools
                 tools = get_live_tools(self._access_mode)
@@ -383,11 +391,18 @@ class LiveSessionManager:
                     if self._current_latency and not self._current_latency.tts_first_audio_ts:
                         self._current_latency.tts_first_audio_ts = time.time()
                         self._current_latency.client_audio_sent_ts = time.time()
-                    # Queue audio — don't block the receive loop on WS writes
+                    # Queue audio with bounded wait to prevent silent drops on fast Gemini responses
                     try:
-                        self._audio_queue.put_nowait(part.inline_data.data)
-                    except asyncio.QueueFull:
-                        log.warning("Audio queue full, dropping chunk", session_id=self.session_id)
+                        await asyncio.wait_for(
+                            self._audio_queue.put(part.inline_data.data),
+                            timeout=1.0,
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning(
+                            "audio_queue_full — chunk dropped after 1s wait",
+                            session_id=self.session_id,
+                            queue_size=self._audio_queue.qsize(),
+                        )
 
                 if part.text:
                     self._recent_transcript.append(part.text)
@@ -416,7 +431,11 @@ class LiveSessionManager:
 
         # 5. Turn complete
         if content.turn_complete:
-            log.info("Turn complete", session_id=self.session_id)
+            log.info(
+                "turn_complete received",
+                session_id=self.session_id,
+                queue_remaining=self._audio_queue.qsize(),
+            )
             self._agent_speaking = False
             await self._transport.send_event("response_complete", {})
             await self._transport.send_event("status", {"state": "listening"})
@@ -435,7 +454,7 @@ class LiveSessionManager:
         for call in tool_call.function_calls:
             try:
                 log.info("Executing Live Tool", name=call.name, args=call.args)
-                result = await execute_tool(call.name, call.args)
+                result = await execute_tool(call.name, call.args, mode=self._access_mode)
                 
                 # Check for agent handoff
                 if result.get("action") == "TRANSFER" and result.get("target"):
@@ -457,26 +476,32 @@ class LiveSessionManager:
     async def perform_handoff(self, target: str) -> None:
         """Dynamically switches the active character profile (prompt and voice) in-place."""
         if not is_character_allowed(target, self._access_mode):
-            log.warning("Handoff request rejected: character restricted in this session mode", target=target)
+            log.warning(
+                "Handoff rejected — character restricted in this access mode",
+                target=target,
+                mode=self._access_mode,
+            )
             return
 
-        log.info("Performing character handoff", target=target)
+        log.info("handoff_started", target=target, session_id=self.session_id)
         new_char = CharacterManager().get_character(target)
         self._character = new_char
         self._voice = new_char.voice
 
-        # Notify visualizer UI to shift theme colors
+        # Notify the frontend to shift theme, orb color, and UI labels
         await self._transport.send_event(
             "character_shift",
             {
                 "character": target,
                 "voice": new_char.voice,
                 "display_name": new_char.display_name,
-            }
+                "color": _PERSONA_COLOR.get(target, "cyan"),
+            },
         )
 
-        # Break connection to trigger dynamic rollover reconnect
+        # Trigger session rollover to reconnect with new system prompt and voice
         self._rollover_requested.set()
+        log.info("handoff_completed", target=target, session_id=self.session_id)
 
 
     # ── Dynamic Configuration Update ──────────────────────────────────────

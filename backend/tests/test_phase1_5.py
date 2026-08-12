@@ -47,10 +47,10 @@ def test_capability_registry_filtering():
 def test_character_manager_presets():
     manager = CharacterManager()
     
-    # Get Nova
+    # Get Nova — voice is now Kore (distinct from Addy's Aoede)
     nova = manager.get_character("nova")
     assert nova.name == "Nova"
-    assert nova.voice == "Aoede"
+    assert nova.voice == "Kore"
     
     # Get Atlas
     atlas = manager.get_character("atlas")
@@ -64,6 +64,7 @@ def test_character_manager_presets():
 
 
 def test_character_prompt_generation():
+    # CharacterProfile now requires public and admin instruction variants
     char = CharacterProfile(
         character_id="test_char",
         name="TestBot",
@@ -73,20 +74,34 @@ def test_character_prompt_generation():
         personality="helpful",
         warmth=0.9,
         technical_level=0.1,
-        system_instructions="Direct test instruction.",
+        system_instructions_public="Public test instruction.",
+        system_instructions_admin="Admin test instruction.",
     )
-    
-    prompt = char.generate_system_instruction(
+
+    # Test public mode prompt
+    prompt_public = char.generate_system_instruction(
         user_name="Adarsh",
         agent_name="Addy",
-        timezone="Asia/Kolkata"
+        timezone="Asia/Kolkata",
+        access_context="public",
     )
-    
-    assert "TestBot" in prompt
-    assert "Adarsh" in prompt
-    assert "Asia/Kolkata" in prompt
-    assert "Direct test instruction." in prompt
-    assert "Highly warm" in prompt
+    assert "TestBot" in prompt_public
+    assert "Asia/Kolkata" in prompt_public
+    assert "Public test instruction." in prompt_public
+    assert "Highly warm" in prompt_public
+    # Public mode must NOT reference Adarsh as the visitor
+    assert "visitor" in prompt_public
+
+    # Test admin mode prompt
+    prompt_admin = char.generate_system_instruction(
+        user_name="Adarsh",
+        agent_name="Addy",
+        timezone="Asia/Kolkata",
+        access_context="admin",
+    )
+    assert "Admin test instruction." in prompt_admin
+    # Admin mode should address Adarsh as the user
+    assert "Adarsh" in prompt_admin
 
 
 def test_character_manager_updates():

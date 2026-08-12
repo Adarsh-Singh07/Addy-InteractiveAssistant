@@ -1,6 +1,10 @@
 """
 Tool registry containing Gemini function declarations
 and Python function handlers for all Addy capabilities.
+
+Security model:
+  PUBLIC  → portfolio_search, collect_lead_info, transfer_to_agent (addy/nova only)
+  ADMIN   → all above + hermes_*, calendar, email, transfer_to_agent (includes atlas)
 """
 
 from __future__ import annotations
@@ -26,21 +30,27 @@ ToolHandler = Callable[..., Any]
 def _run_hermes_cli(query: str) -> dict[str, Any]:
     """Execute a single query against Hermes CLI using a secure subprocess."""
     try:
-        # Default venv python path for Hermes on the VPS
         hermes_home = os.environ.get("HERMES_HOME", "/home/ubuntu/.hermes")
         hermes_cli_py = os.path.join(hermes_home, "hermes-agent", "cli.py")
         hermes_python = os.path.join(hermes_home, "hermes-agent", "venv", "bin", "python")
 
         if not os.path.exists(hermes_cli_py):
-            # Fallback path if we are running locally/differently
-            hermes_cli_py = "E:\\Projects\\hermes-agent\\cli.py"
-            hermes_python = "python"
+            log.warning(
+                "Hermes CLI not found at configured path",
+                path=hermes_cli_py,
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"Hermes is not reachable. CLI not found at: {hermes_cli_py}. "
+                    "Please verify HERMES_HOME is correctly configured on the VPS."
+                ),
+            }
 
-        log.info("Invoking Hermes CLI subprocess", query=query)
+        log.info("Invoking Hermes CLI subprocess", query_preview=query[:60])
         env = os.environ.copy()
         env["HERMES_HOME"] = hermes_home
 
-        # Execute subprocess
         res = subprocess.run(
             [hermes_python, hermes_cli_py, "-q", query, "--quiet"],
             capture_output=True,
@@ -53,7 +63,7 @@ def _run_hermes_cli(query: str) -> dict[str, Any]:
         stderr = res.stderr.strip()
         exit_code = res.returncode
 
-        log.info("Hermes CLI finished execution", exit_code=exit_code)
+        log.info("Hermes CLI execution complete", exit_code=exit_code)
 
         if exit_code == 0:
             return {"success": True, "output": stdout}
@@ -62,24 +72,37 @@ def _run_hermes_cli(query: str) -> dict[str, Any]:
 
     except subprocess.TimeoutExpired:
         log.warning("Hermes CLI execution timed out")
-        return {"success": False, "error": "Hermes execution timed out after 45 seconds"}
+        return {"success": False, "error": "Hermes execution timed out after 45 seconds."}
     except Exception as exc:
-        log.error("Hermes CLI subprocess invocation failed", error=str(exc))
+        log.error("Hermes CLI subprocess failed", error=str(exc))
         return {"success": False, "error": str(exc)}
 
 
-# ── Typed Python Tool Handlers ────────────────────────────────────────────────
+# ── Python Tool Handlers ──────────────────────────────────────────────────────
 
 async def handle_portfolio_search(query: str) -> dict[str, Any]:
-    """Search Adarsh's portfolio CV database via the local API endpoint."""
+    """Search Adarsh's portfolio CV database via the portfolio backend API."""
     import httpx
+    portfolio_url = settings.portfolio_backend_url
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            url = "http://127.0.0.1:8000/api/v1/portfolio/rag/playground"
+            url = f"{portfolio_url}/api/v1/portfolio/rag/playground"
             resp = await client.get(url, params={"query": query})
             if resp.status_code == 200:
                 return {"success": True, "results": resp.json()}
-            return {"success": False, "error": f"API returned code {resp.status_code}"}
+            return {
+                "success": False,
+                "error": f"Portfolio API returned status {resp.status_code}",
+            }
+    except httpx.ConnectError:
+        log.warning("Portfolio backend unreachable", url=portfolio_url)
+        return {
+            "success": False,
+            "error": (
+                "Portfolio information is temporarily unavailable. "
+                "I'll answer based on what I know, but cannot retrieve real-time details right now."
+            ),
+        }
     except Exception as exc:
         log.error("Portfolio RAG tool failed", error=str(exc))
         return {"success": False, "error": str(exc)}
@@ -89,126 +112,169 @@ async def handle_collect_lead_info(name: str, email: str, requirements: str) -> 
     """Collect outreach contact information and save to SQLite db."""
     try:
         save_lead(name, email, requirements)
-        log.info("Lead collected successfully", name=name, email=email)
-        return {"success": True, "message": "Outreach contact details saved successfully."}
+        log.info("Lead collected successfully", name=name)
+        return {
+            "success": True,
+            "message": f"Contact request saved. Adarsh has been notified about {name}'s enquiry.",
+        }
     except Exception as exc:
         log.error("Lead collection tool failed", error=str(exc))
         return {"success": False, "error": str(exc)}
 
 
 async def handle_transfer_to_agent(agent_name: str) -> dict[str, Any]:
-    """Switches the session's active assistant agent persona."""
-    # Handled at the session level; return routing state to session loop
+    """
+    Switches the session's active assistant persona.
+
+    Note: The transfer target is validated at the session level against
+    the current AccessMode. Public sessions cannot transfer to 'atlas'.
+    """
     return {"success": True, "action": "TRANSFER", "target": agent_name.lower()}
 
 
 async def handle_hermes_get_status() -> dict[str, Any]:
-    """Check Hermes server, active gateway status, and systems."""
+    """Check Hermes server, active gateway status, and systems (admin only)."""
     return _run_hermes_cli("Check server and gateway status.")
 
 
 async def handle_hermes_check_deployment(project: str) -> dict[str, Any]:
-    """Check project deployment logs and branch health."""
+    """Check project deployment logs and branch health (admin only)."""
     return _run_hermes_cli(f"Check deployment status for project {project}.")
 
 
-async def handle_hermes_deploy_project(project: str, target: str, confirm: bool = False) -> dict[str, Any]:
-    """Deploy a target project to environment."""
+async def handle_hermes_deploy_project(
+    project: str, target: str, confirm: bool = False
+) -> dict[str, Any]:
+    """Deploy a target project to environment (requires verbal confirmation, admin only)."""
     if not confirm:
         return {
             "success": False,
             "status": "CONFIRMATION_REQUIRED",
-            "message": f"Deploying {project} to {target} requires verbal confirmation. Ask user to confirm."
+            "message": (
+                f"Deploying {project} to {target} will restart the service and apply code changes. "
+                "Please ask Adarsh to confirm before proceeding."
+            ),
         }
     return _run_hermes_cli(f"Deploy project {project} to target environment {target}.")
 
 
 async def handle_hermes_restart_service(service: str, confirm: bool = False) -> dict[str, Any]:
-    """Restart a system service."""
+    """Restart a system service (requires verbal confirmation, admin only)."""
     if not confirm:
         return {
             "success": False,
             "status": "CONFIRMATION_REQUIRED",
-            "message": f"Restarting system service {service} requires verbal confirmation. Ask user to confirm."
+            "message": (
+                f"Restarting service '{service}' will cause a brief outage. "
+                "Please ask Adarsh to confirm before proceeding."
+            ),
         }
     return _run_hermes_cli(f"Restart system service {service}.")
 
 
 async def handle_hermes_git_update(project: str, confirm: bool = False) -> dict[str, Any]:
-    """Fetch updates, clean conflict, and pull git repository."""
+    """Fetch and pull git repository updates (requires verbal confirmation, admin only)."""
     if not confirm:
         return {
             "success": False,
             "status": "CONFIRMATION_REQUIRED",
-            "message": f"Git pulling and updating {project} requires verbal confirmation. Ask user to confirm."
+            "message": (
+                f"Pulling updates for {project} will apply the latest code changes. "
+                "Please ask Adarsh to confirm before proceeding."
+            ),
         }
     return _run_hermes_cli(f"Git pull updates and resolve conflicts for {project}.")
 
 
 async def handle_read_calendar_availability() -> dict[str, Any]:
     """Read calendar availability (Admin only)."""
-    # Placeholder integration
-    return {"success": True, "availability": "Adarsh is free between 2:00 PM and 5:00 PM IST today."}
+    # Placeholder — real integration pending
+    return {
+        "success": True,
+        "availability": "Calendar integration is not yet configured. Contact Adarsh directly for scheduling.",
+    }
 
 
 async def handle_send_admin_email(to: str, subject: str, body: str) -> dict[str, Any]:
-    """Send administrative email via Zoho Mail (Admin only)."""
-    # Placeholder integration
-    log.info("Sending admin email", to=to, subject=subject)
-    return {"success": True, "message": f"Email sent successfully to {to}."}
+    """Send administrative email (Admin only)."""
+    # Placeholder — real Zoho integration pending
+    log.info("Admin email requested", to=to, subject=subject)
+    return {
+        "success": False,
+        "error": "Email integration is not yet configured. This feature is coming soon.",
+    }
 
 
-# ── Function Declaration Registries ──────────────────────────────────────────
+# ── Function Declarations ─────────────────────────────────────────────────────
 
+# Public tools — safe for any visitor
 _PUBLIC_DECLARATIONS = [
     types.FunctionDeclaration(
         name="portfolio_search",
-        description="Search Adarsh's portfolio CV database to answer questions about projects, experience, or skills.",
+        description=(
+            "Search Adarsh's portfolio and CV database to answer questions about "
+            "his projects, skills, experience, or services."
+        ),
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "query": types.Schema(
                     type="STRING",
-                    description="The search keywords to retrieve relevant CV chunks."
+                    description="The search query to retrieve relevant portfolio information.",
                 )
             },
-            required=["query"]
-        )
+            required=["query"],
+        ),
     ),
     types.FunctionDeclaration(
         name="collect_lead_info",
-        description="Collect outreach name, email, and description from a recruiter or client looking to hire Adarsh.",
+        description=(
+            "Collect contact information (name, email, requirements) from a visitor "
+            "who wants to get in touch with or hire Adarsh. "
+            "Only call this AFTER the visitor has confirmed their details."
+        ),
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "name": types.Schema(type="STRING", description="Visitor's name"),
                 "email": types.Schema(type="STRING", description="Visitor's email address"),
-                "requirements": types.Schema(type="STRING", description="Outreach details/message"),
+                "requirements": types.Schema(
+                    type="STRING",
+                    description="What the visitor wants to discuss or request",
+                ),
             },
-            required=["name", "email", "requirements"]
-        )
+            required=["name", "email", "requirements"],
+        ),
     ),
     types.FunctionDeclaration(
         name="transfer_to_agent",
-        description="Switch the conversation to another assistant agent (addy, nova, or atlas).",
+        description=(
+            "Switch the conversation to another assistant persona. "
+            "Public users can only transfer to 'addy' or 'nova'. "
+            "'atlas' is restricted to authenticated administrators only."
+        ),
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "agent_name": types.Schema(
                     type="STRING",
-                    description="The character profile ID to switch to: 'addy' (public twin), 'nova' (concierge), or 'atlas' (senior engineer)."
+                    description=(
+                        "Target persona ID: 'addy' (public AI twin) or 'nova' (contact specialist). "
+                        "Do NOT transfer to 'atlas' for public visitors."
+                    ),
                 )
             },
-            required=["agent_name"]
-        )
-    )
+            required=["agent_name"],
+        ),
+    ),
 ]
 
+# Admin tools — includes hermes, email, calendar, and atlas access
 _ADMIN_DECLARATIONS = _PUBLIC_DECLARATIONS + [
     types.FunctionDeclaration(
         name="hermes_get_status",
-        description="Check active server status, messaging gateway processes, and general systems.",
-        parameters=types.Schema(type="OBJECT", properties={})
+        description="Check active server status, messaging gateway processes, and system health.",
+        parameters=types.Schema(type="OBJECT", properties={}),
     ),
     types.FunctionDeclaration(
         name="hermes_check_deployment",
@@ -218,76 +284,80 @@ _ADMIN_DECLARATIONS = _PUBLIC_DECLARATIONS + [
             properties={
                 "project": types.Schema(type="STRING", description="Name of the project to check")
             },
-            required=["project"]
-        )
+            required=["project"],
+        ),
     ),
     types.FunctionDeclaration(
         name="hermes_deploy_project",
-        description="Deploy a target project to environment (requires verbal confirmation).",
+        description="Deploy a target project to environment (requires verbal confirmation from Adarsh).",
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "project": types.Schema(type="STRING", description="Project name"),
-                "target": types.Schema(type="STRING", description="Target environment (e.g. production)"),
+                "target": types.Schema(
+                    type="STRING", description="Target environment (e.g. production)"
+                ),
                 "confirm": types.Schema(
                     type="BOOLEAN",
-                    description="Set to true ONLY if the user verbally confirmed proceeding with deployment."
+                    description="Set to true ONLY after Adarsh has verbally confirmed the deployment.",
                 ),
             },
-            required=["project", "target"]
-        )
+            required=["project", "target"],
+        ),
     ),
     types.FunctionDeclaration(
         name="hermes_restart_service",
-        description="Restart a system systemd service on the VPS (requires verbal confirmation).",
+        description="Restart a systemd service on the VPS (requires verbal confirmation from Adarsh).",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "service": types.Schema(type="STRING", description="Service name (e.g., nginx, addy)"),
+                "service": types.Schema(
+                    type="STRING", description="Service name (e.g. nginx, addy, portfolio)"
+                ),
                 "confirm": types.Schema(
                     type="BOOLEAN",
-                    description="Set to true ONLY if the user verbally confirmed proceeding with restart."
+                    description="Set to true ONLY after Adarsh has verbally confirmed the restart.",
                 ),
             },
-            required=["service"]
-        )
+            required=["service"],
+        ),
     ),
     types.FunctionDeclaration(
         name="hermes_git_update",
-        description="Git pull updates and resolve conflicts for a code repository (requires verbal confirmation).",
+        description="Git pull and update a code repository (requires verbal confirmation from Adarsh).",
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "project": types.Schema(type="STRING", description="Project repo name"),
                 "confirm": types.Schema(
                     type="BOOLEAN",
-                    description="Set to true ONLY if the user verbally confirmed proceeding with git pull."
+                    description="Set to true ONLY after Adarsh has verbally confirmed the git pull.",
                 ),
             },
-            required=["project"]
-        )
+            required=["project"],
+        ),
     ),
     types.FunctionDeclaration(
         name="read_calendar_availability",
-        description="Read Adarsh's calendar availability timeline for scheduling.",
-        parameters=types.Schema(type="OBJECT", properties={})
+        description="Read Adarsh's calendar availability for scheduling.",
+        parameters=types.Schema(type="OBJECT", properties={}),
     ),
     types.FunctionDeclaration(
         name="send_admin_email",
-        description="Send an administrative email to a target recipient.",
+        description="Send an administrative email to a recipient.",
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "to": types.Schema(type="STRING", description="Recipient email address"),
                 "subject": types.Schema(type="STRING", description="Email subject"),
-                "body": types.Schema(type="STRING", description="Body text content of email")
+                "body": types.Schema(type="STRING", description="Email body content"),
             },
-            required=["to", "subject", "body"]
-        )
-    )
+            required=["to", "subject", "body"],
+        ),
+    ),
 ]
 
-# Handler map matching function names to python functions
+# Handler map
 _HANDLER_MAP: dict[str, ToolHandler] = {
     "portfolio_search": handle_portfolio_search,
     "collect_lead_info": handle_collect_lead_info,
@@ -301,18 +371,42 @@ _HANDLER_MAP: dict[str, ToolHandler] = {
     "send_admin_email": handle_send_admin_email,
 }
 
+# Admin-only handler names — rejected if called in PUBLIC mode
+_ADMIN_ONLY_TOOLS = {
+    "hermes_get_status",
+    "hermes_check_deployment",
+    "hermes_deploy_project",
+    "hermes_restart_service",
+    "hermes_git_update",
+    "read_calendar_availability",
+    "send_admin_email",
+}
+
 
 def get_live_tools(mode: AccessMode) -> list[types.Tool]:
-    """Retrieve Tool list containing appropriate function declarations for AccessMode."""
+    """Retrieve Tool list with appropriate function declarations for the AccessMode."""
     declarations = _ADMIN_DECLARATIONS if mode == AccessMode.ADMIN else _PUBLIC_DECLARATIONS
     return [types.Tool(function_declarations=declarations)]
 
 
-async def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Execute tool handler by function name."""
+async def execute_tool(
+    name: str,
+    arguments: dict[str, Any],
+    mode: AccessMode = AccessMode.PUBLIC,
+) -> dict[str, Any]:
+    """Execute tool handler by function name, enforcing access control."""
+    # Hard enforcement: admin-only tools cannot be called in PUBLIC sessions
+    if name in _ADMIN_ONLY_TOOLS and mode != AccessMode.ADMIN:
+        log.warning("Public session attempted to call admin-only tool", tool=name)
+        return {
+            "success": False,
+            "error": f"Tool '{name}' is restricted to authenticated administrators.",
+        }
+
     handler = _HANDLER_MAP.get(name)
     if not handler:
-        return {"success": False, "error": f"Tool '{name}' not registered."}
+        return {"success": False, "error": f"Tool '{name}' is not registered."}
+
     try:
         return await handler(**arguments)
     except Exception as exc:

@@ -243,6 +243,47 @@ function handleServerEvent(event) {
       setStatus('listening', 'Listening');
       break;
 
+    case 'character_shift': {
+      // Backend emitted a persona handoff — update frontend state completely
+      const target = event.character || event.payload?.character || 'addy';
+      const voice  = event.voice   || event.payload?.voice   || 'Aoede';
+      const color  = event.color   || event.payload?.color   || 'cyan';
+      logInfo(`character_shift: ${selectedCharacter} → ${target} (voice: ${voice}, color: ${color})`);
+
+      // Update local state
+      selectedCharacter = target;
+      selectedVoice     = voice;
+      if (voiceSelect) voiceSelect.value = voice;
+
+      // Update character display
+      const nameEl = document.getElementById('active-char-name');
+      const descEl = document.getElementById('active-char-desc');
+      if (nameEl) nameEl.textContent = target.charAt(0).toUpperCase() + target.slice(1);
+      if (descEl) descEl.textContent = getCharacterDesc(target);
+
+      // Update persona tab active states
+      ['addy', 'nova', 'atlas'].forEach(c => {
+        const el = document.getElementById(`btn-char-${c}`);
+        if (el) el.classList.toggle('active', c === target);
+      });
+
+      // Apply persona body class for CSS color transition (800ms)
+      document.body.classList.remove('persona-nova', 'persona-atlas');
+      if (target === 'nova')  document.body.classList.add('persona-nova');
+      if (target === 'atlas') document.body.classList.add('persona-atlas');
+
+      // Show transition status
+      const displayName = target.charAt(0).toUpperCase() + target.slice(1);
+      setStatus('connecting', `Connecting to ${displayName}…`);
+
+      // Trigger a backend session rollover for the new persona (with new voice)
+      // Short delay to let the handoff sentence audio finish playing
+      setTimeout(() => {
+        sendSettingsUpdate();
+      }, 900);
+      break;
+    }
+
     case 'metrics': {
       // Backend sends flat: {type: 'metrics', total_duration: ..., ...}
       updateMetrics(event.payload || event);
@@ -501,14 +542,16 @@ function appendResponseToken(token) {
 
 function appendTranscriptBubble(sender, text) {
   const msg = document.createElement('div');
-  msg.className = `msg msg-${sender}`;
+  msg.className = sender === 'user' ? 'transcript-bubble-user' : 'transcript-bubble-ai';
 
   const label = document.createElement('span');
   label.className = 'msg-label';
-  label.textContent = sender === 'user' ? 'You' : selectedCharacter.toUpperCase();
+  label.textContent = sender === 'user' ? 'You' : selectedCharacter.charAt(0).toUpperCase() + selectedCharacter.slice(1);
+  label.style.cssText = 'display:block;font-size:0.65rem;opacity:0.5;margin-bottom:2px;letter-spacing:0.06em;text-transform:uppercase;';
 
   const bubble = document.createElement('p');
   bubble.className = 'msg-bubble';
+  bubble.style.margin = '0';
   bubble.textContent = text;
 
   msg.appendChild(label);
@@ -656,6 +699,22 @@ function setupEventListeners() {
     interimText.textContent = '';
     currentAssistantBubble = null;
   });
+
+  // Gear button toggles settings panel
+  const gearBtn    = document.getElementById('gear-btn');
+  const settingsPanel = document.getElementById('settings-panel');
+  const settingsClose = document.getElementById('settings-close');
+
+  if (gearBtn && settingsPanel) {
+    gearBtn.addEventListener('click', () => {
+      settingsPanel.classList.toggle('open');
+    });
+  }
+  if (settingsClose && settingsPanel) {
+    settingsClose.addEventListener('click', () => {
+      settingsPanel.classList.remove('open');
+    });
+  }
 }
 
 function updateUIForModelCapabilities() {
@@ -808,13 +867,17 @@ function startOrbAnimation() {
 function setStatus(state, label) {
   agentState = state;
   const engineSuffix = selectedEngine === 'gemini_live' ? ' (Gemini Live)' : ' (Deepgram)';
-  
+
   if (state === 'listening' || state === 'thinking' || state === 'speaking') {
     statusValue.textContent = label + engineSuffix;
   } else {
     statusValue.textContent = label;
   }
   statusValue.className = `status-value ${state}`;
+
+  // Apply body state class for CSS ring/orb reactivity
+  document.body.classList.remove('state-idle', 'state-listening', 'state-thinking', 'state-speaking', 'state-error', 'state-interrupted', 'state-connecting');
+  document.body.classList.add(`state-${state}`);
 
   // Update mic button class during active play
   if (state === 'speaking') {
@@ -846,35 +909,33 @@ function reconnect() {
 
 function selectCharacterPreset(char) {
   selectedCharacter = char;
-  
-  // Set default voices
+
+  // Set correct default voices per persona
   if (char === 'atlas') {
     selectedVoice = 'Charon';
+  } else if (char === 'nova') {
+    selectedVoice = 'Kore';  // Nova uses Kore, distinct from Addy's Aoede
   } else {
-    selectedVoice = 'Aoede';
+    selectedVoice = 'Aoede'; // Addy default
   }
-  if (voiceSelect) {
-    voiceSelect.value = selectedVoice;
-  }
+  if (voiceSelect) voiceSelect.value = selectedVoice;
 
-  // Update UI display
+  // Update character display labels
   const nameEl = document.getElementById('active-char-name');
   const descEl = document.getElementById('active-char-desc');
   if (nameEl) nameEl.textContent = char.charAt(0).toUpperCase() + char.slice(1);
   if (descEl) descEl.textContent = getCharacterDesc(char);
 
-  // Update segmented control buttons
-  const chars = ['addy', 'nova', 'atlas'];
-  chars.forEach(c => {
+  // Update persona tab active states
+  ['addy', 'nova', 'atlas'].forEach(c => {
     const el = document.getElementById(`btn-char-${c}`);
-    if (el) {
-      if (c === char) {
-        el.classList.add('active');
-      } else {
-        el.classList.remove('active');
-      }
-    }
+    if (el) el.classList.toggle('active', c === char);
   });
+
+  // Apply persona body class for CSS color transition
+  document.body.classList.remove('persona-nova', 'persona-atlas');
+  if (char === 'nova')  document.body.classList.add('persona-nova');
+  if (char === 'atlas') document.body.classList.add('persona-atlas');
 
   reconnect();
 }
@@ -919,14 +980,19 @@ async function performAdminLogin() {
       if (data.access_mode === 'ADMIN') {
         isAdminAuthenticated = true;
         adminToggleBtn.classList.add('authenticated');
-        adminToggleBtn.textContent = '🔓 Admin';
-        
+        adminToggleBtn.textContent = '🔓';
+
+        // Unlock UI: show Atlas tab, apply admin body class
+        document.body.classList.add('admin-unlocked');
+        const atlasBtn = document.getElementById('btn-char-atlas');
+        if (atlasBtn) atlasBtn.removeAttribute('hidden');
+
         // Hide modal and clear input
         adminLoginModal.classList.add('hidden');
         adminLoginError.classList.add('hidden');
         adminPasscodeInput.value = '';
 
-        // Switch to Atlas
+        // Switch to Atlas automatically
         selectCharacterPreset('atlas');
       }
     } else {
@@ -947,8 +1013,13 @@ async function logoutAdmin() {
     if (resp.ok) {
       isAdminAuthenticated = false;
       adminToggleBtn.classList.remove('authenticated');
-      adminToggleBtn.textContent = '🔑 Lock';
-      
+      adminToggleBtn.textContent = '🔑';
+
+      // Remove admin UI
+      document.body.classList.remove('admin-unlocked');
+      const atlasBtn = document.getElementById('btn-char-atlas');
+      if (atlasBtn) atlasBtn.setAttribute('hidden', '');
+
       // Fallback to Addy
       selectCharacterPreset('addy');
     }
@@ -959,9 +1030,9 @@ async function logoutAdmin() {
 
 function getCharacterDesc(char) {
   if (char === 'addy') return "Adarsh's AI Twin";
-  if (char === 'nova') return "Concierge & Recruiter";
-  if (char === 'atlas') return "AI OS Core (Admin)";
-  return "Assistant";
+  if (char === 'nova') return 'Contact & Enquiry Specialist';
+  if (char === 'atlas') return 'Private AI OS (Admin)';
+  return 'Assistant';
 }
 
 function logInfo(msg) {

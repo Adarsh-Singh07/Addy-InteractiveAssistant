@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     qdrant_host: str = "qdrant"
     qdrant_port: int = 6333
 
+    # ── Portfolio backend ─────────────────────────────────────────────────
+    # URL of the portfolio FastAPI backend (for RAG and chatbot tools)
+    portfolio_backend_url: str = "http://127.0.0.1:8000"
+
     # ── Hermes integration ────────────────────────────────────────────────
     hermes_url: str | None = None
     hermes_api_key: SecretStr | None = None
