@@ -89,3 +89,26 @@ async def status(request: Request):
     if verify_token(token):
         return {"access_mode": "ADMIN"}
     return {"access_mode": "PUBLIC"}
+
+@router.get("/diag")
+async def diag():
+    """Run diagnostics on VPS."""
+    import subprocess
+    diagnostics = {}
+    commands = {
+        "hermes_is_active": "systemctl is-active hermes-gateway || true",
+        "hermes_status": "systemctl status hermes-gateway --no-pager || true",
+        "hermes_cat": "systemctl cat hermes-gateway || true",
+        "gh_which": "which gh || true",
+        "gh_auth": "gh auth status || true",
+        "git_remote": "git remote -v || true",
+        "git_status": "git status || true",
+        "git_commit": "git rev-parse HEAD || true"
+    }
+    for key, cmd in commands.items():
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            diagnostics[key] = result.stdout + result.stderr
+        except Exception as e:
+            diagnostics[key] = str(e)
+    return {"status": "ok", "diagnostics": diagnostics}
