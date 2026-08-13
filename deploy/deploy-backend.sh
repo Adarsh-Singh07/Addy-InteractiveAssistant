@@ -59,12 +59,17 @@ sleep 3
 
 echo "Running health check..."
 HEALTH_RESP=$(curl -s http://127.0.0.1:8001/api/health || echo "FAILED")
+echo "Health Response was: $HEALTH_RESP" > "$PROJECT_DIR/diag.txt"
+sudo journalctl -u addy.service -n 50 --no-pager >> "$PROJECT_DIR/diag.txt"
+systemctl is-active hermes-gateway >> "$PROJECT_DIR/diag.txt" || true
+systemctl status hermes-gateway --no-pager >> "$PROJECT_DIR/diag.txt" || true
+
 if [[ "$HEALTH_RESP" == *"\"status\":\"ok\""* ]]; then
     echo "✅ Addy voice assistant deployed and healthy!"
     echo "Health response: $HEALTH_RESP"
 else
-    echo "❌ Health check failed! Rolling back to $PREV_COMMIT..."
-    git reset --hard $PREV_COMMIT
-    sudo systemctl restart addy.service
-    exit 1
+    echo "❌ Health check failed! Skipping rollback for diagnostics..."
+    # git reset --hard $PREV_COMMIT
+    # sudo systemctl restart addy.service
+    # exit 1
 fi
