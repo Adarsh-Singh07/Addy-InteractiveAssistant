@@ -98,12 +98,11 @@ async def diag():
     commands = {
         "portfolio_env": "cat /home/ubuntu/portfolio/backend/.env | grep 'LARK' | sed 's/=.*/=SET/' || true",
         "portfolio_status": "systemctl status portfolio.service --no-pager -l || true",
-        "portfolio_cat": "cat /etc/systemd/system/portfolio.service || true",
-        "portfolio_git": "cd /home/ubuntu/portfolio && git log -1 --oneline || true",
+        "portfolio_git": "cd /home/ubuntu/portfolio && git log -1 --oneline && git rev-parse HEAD || true",
         "portfolio_git_status": "cd /home/ubuntu/portfolio && git status || true",
-        "portfolio_pwd": "cd /home/ubuntu/portfolio/backend && pwd || true",
-        "nginx_portfolio": "cat /etc/nginx/sites-enabled/api.adarshsingh.in.conf || true",
-        "nginx_access": "tail -n 50 /var/log/nginx/access.log | grep -i 'webhook' || true"
+        "portfolio_journal": "journalctl -u portfolio.service --since '30 minutes ago' --no-pager || true",
+        "nginx_access": "tail -n 100 /var/log/nginx/access.log || true",
+        "nginx_error": "tail -n 100 /var/log/nginx/error.log || true"
     }
     for key, cmd in commands.items():
         try:
