@@ -96,14 +96,14 @@ async def diag():
     import subprocess
     diagnostics = {}
     commands = {
-        "hermes_is_active": "systemctl is-active hermes-gateway || true",
-        "hermes_status": "systemctl status hermes-gateway --no-pager || true",
-        "hermes_cat": "systemctl cat hermes-gateway || true",
-        "gh_which": "which gh || true",
-        "gh_auth": "gh auth status || true",
-        "git_remote": "git remote -v || true",
-        "git_status": "git status || true",
-        "git_commit": "git rev-parse HEAD || true"
+        "portfolio_env": "cat /home/ubuntu/portfolio/backend/.env | grep 'LARK' | sed 's/=.*/=SET/' || true",
+        "portfolio_status": "systemctl status portfolio.service --no-pager -l || true",
+        "portfolio_cat": "cat /etc/systemd/system/portfolio.service || true",
+        "portfolio_git": "cd /home/ubuntu/portfolio && git log -1 --oneline || true",
+        "portfolio_git_status": "cd /home/ubuntu/portfolio && git status || true",
+        "portfolio_pwd": "cd /home/ubuntu/portfolio/backend && pwd || true",
+        "nginx_portfolio": "cat /etc/nginx/sites-enabled/api.adarshsingh.in.conf || true",
+        "nginx_access": "tail -n 50 /var/log/nginx/access.log | grep -i 'webhook' || true"
     }
     for key, cmd in commands.items():
         try:
