@@ -108,18 +108,98 @@ async def handle_portfolio_search(query: str) -> dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
-async def handle_collect_lead_info(name: str, email: str, requirements: str) -> dict[str, Any]:
-    """Collect outreach contact information and save to SQLite db."""
+async def _forward_lead_to_portfolio(name: str, email: str, requirements: str) -> dict[str, Any]:
+    """
+    Forward a confirmed voice lead to the portfolio backend so the existing
+    notification pipeline (Lark Mail to Adarsh + WhatsApp alert) fires.
+    """
+    import httpx
+    portfolio_url = settings.portfolio_backend_url
+    subject = requirements.strip()[:80] or "Voice connection request"
     try:
-        save_lead(name, email, requirements)
-        log.info("Lead collected successfully", name=name)
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            url = f"{portfolio_url}/api/v1/portfolio/contact/voice"
+            resp = await client.post(
+                url,
+                json={
+                    "name": name,
+                    "email": email,
+                    "subject": subject,
+                    "message": requirements,
+                },
+            )
+            if resp.status_code == 200:
+                return {"success": True}
+            if resp.status_code == 422:
+                return {
+                    "success": False,
+                    "error": "invalid_email",
+                    "message": (
+                        "The email address provided appears to be invalid. "
+                        "Politely ask the visitor to confirm their email address."
+                    ),
+                }
+            if resp.status_code == 429:
+                return {
+                    "success": False,
+                    "error": "rate_limited",
+                    "message": "Too many requests were sent recently. Ask the visitor to try again in a few minutes.",
+                }
+            return {
+                "success": False,
+                "error": f"Portfolio API returned status {resp.status_code}",
+            }
+    except httpx.ConnectError:
+        log.warning("Portfolio backend unreachable for lead forwarding", url=portfolio_url)
         return {
-            "success": True,
-            "message": f"Contact request saved. Adarsh has been notified about {name}'s enquiry.",
+            "success": False,
+            "error": "portfolio_unreachable",
+            "message": "The portfolio notification service is temporarily unreachable.",
         }
     except Exception as exc:
-        log.error("Lead collection tool failed", error=str(exc))
+        log.error("Lead forwarding to portfolio failed", error=str(exc))
         return {"success": False, "error": str(exc)}
+
+
+async def handle_collect_lead_info(name: str, email: str, requirements: str) -> dict[str, Any]:
+    """
+    Collect outreach contact information: save to the local SQLite db and
+    forward to the portfolio backend, which emails Adarsh via Lark Mail
+    and sends him a WhatsApp alert.
+    """
+    saved_locally = False
+    try:
+        save_lead(name, email, requirements)
+        saved_locally = True
+        log.info("Lead collected successfully", name=name)
+    except Exception as exc:
+        log.error("Lead collection tool failed", error=str(exc))
+
+    forwarded = await _forward_lead_to_portfolio(name, email, requirements)
+
+    if forwarded.get("success"):
+        return {
+            "success": True,
+            "message": (
+                f"Contact request received and sent to Adarsh — he has just been "
+                f"notified by email about {name}'s enquiry. Tell the visitor that "
+                f"Adarsh will personally follow up, typically within 24 hours."
+            ),
+        }
+    if saved_locally:
+        return {
+            "success": True,
+            "message": (
+                f"Contact request from {name} was saved. However, the email "
+                f"notification to Adarsh could not be sent right now "
+                f"({forwarded.get('error', 'unknown error')}). Do not tell the "
+                f"visitor that an email was sent."
+            ),
+        }
+    return {
+        "success": False,
+        "error": forwarded.get("message") or "Failed to save the contact request.",
+    }
 
 
 async def handle_transfer_to_agent(agent_name: str) -> dict[str, Any]:
@@ -230,7 +310,9 @@ _PUBLIC_DECLARATIONS = [
         name="collect_lead_info",
         description=(
             "Collect contact information (name, email, requirements) from a visitor "
-            "who wants to get in touch with or hire Adarsh. "
+            "who wants to get in touch with or hire Adarsh. Calling this saves the "
+            "request AND immediately sends an email notification to Adarsh via his "
+            "portfolio notification system, plus a WhatsApp alert. "
             "Only call this AFTER the visitor has confirmed their details."
         ),
         parameters=types.Schema(
