@@ -172,6 +172,7 @@ async function boot() {
   let tracker = null;
   let cameraStream = null;
   let gestureRaf = 0;
+  let lastVideoTime = -1;
   let handStates = new Map();
   let previousMode = 'idle';
   let previousGrab = null;
@@ -215,27 +216,57 @@ async function boot() {
     const context = overlay?.getContext('2d'); context?.clearRect(0, 0, overlay.width, overlay.height);
   }
   function processHands(landmarks) {
+    const context = overlay.getContext('2d');
+    context.clearRect(0, 0, overlay.width, overlay.height);
+
     const pinched = [];
     landmarks.forEach((landmark, index) => {
       const scale = distance(landmark[0], landmark[9]);
       const ratio = distance(landmark[4], landmark[8]) / Math.max(scale, 0.0001);
       const raw = { x: 1 - (landmark[4].x + landmark[8].x) / 2, y: (landmark[4].y + landmark[8].y) / 2 };
-      const state = handStates.get(index) || { pinching: false, grab: raw };
+      const state = handStates.get(index) || { pinching: false, grab: { x: raw.x, y: raw.y } };
       if (state.pinching && ratio > 0.45) state.pinching = false;
       if (!state.pinching && ratio < 0.32) state.pinching = true;
-      state.grab = { x: state.grab.x + (raw.x - state.grab.x) * 0.4, y: state.grab.y + (raw.y - state.grab.y) * 0.4 };
+      // Smooth the live point in place, but push a COPY into pinched so the
+      // current vs previous delta is never comparing the same object.
+      state.grab.x += (raw.x - state.grab.x) * 0.45;
+      state.grab.y += (raw.y - state.grab.y) * 0.45;
       handStates.set(index, state);
-      if (state.pinching) pinched.push(state.grab);
+      if (state.pinching) pinched.push({ x: state.grab.x, y: state.grab.y });
+      // Draw the pinch indicator (always, even when not pinching)
+      const a = landmark[4], b = landmark[8];
+      context.strokeStyle = state.pinching ? '#d8fbff' : 'rgba(216,251,255,0.5)';
+      context.beginPath();
+      context.moveTo((1 - a.x) * overlay.width, a.y * overlay.height);
+      context.lineTo((1 - b.x) * overlay.width, b.y * overlay.height);
+      context.stroke();
     });
+
     const mode = pinched.length > 1 ? 'zoom' : pinched.length === 1 ? 'spin' : 'idle';
     if (mode !== previousMode) { previousGrab = null; previousDistance = null; previousMode = mode; }
-    if (mode === 'spin') { if (previousGrab) rotateBy((pinched[0].x - previousGrab.x) * 4.2, (pinched[0].y - previousGrab.y) * 4.2); previousGrab = pinched[0]; }
-    if (mode === 'zoom') { const d = distance(pinched[0], pinched[1]); if (previousDistance) zoomBy(THREE.MathUtils.clamp(previousDistance / d, 0.86, 1.16)); previousDistance = d; }
-    gestureStatus.textContent = landmarks.length ? `${landmarks.length} HAND${landmarks.length > 1 ? 'S' : ''} · ${mode.toUpperCase()}` : 'SHOW HANDS';
-    const context = overlay.getContext('2d'); context.clearRect(0, 0, overlay.width, overlay.height);
-    landmarks.forEach((landmark) => { const a = landmark[4], b = landmark[8]; context.strokeStyle = '#d8fbff'; context.beginPath(); context.moveTo((1 - a.x) * overlay.width, a.y * overlay.height); context.lineTo((1 - b.x) * overlay.width, b.y * overlay.height); context.stroke(); });
+    if (mode === 'spin') {
+      if (previousGrab) rotateBy((pinched[0].x - previousGrab.x) * 5.0, (pinched[0].y - previousGrab.y) * 5.0);
+      previousGrab = pinched[0] ? { x: pinched[0].x, y: pinched[0].y } : null;
+    }
+    if (mode === 'zoom') {
+      const d = distance(pinched[0], pinched[1]);
+      if (previousDistance) zoomBy(THREE.MathUtils.clamp(previousDistance / d, 0.85, 1.18));
+      previousDistance = d;
+    }
+    gestureStatus.textContent = landmarks.length
+      ? `${landmarks.length} HAND${landmarks.length > 1 ? 'S' : ''} · ${mode.toUpperCase()}`
+      : 'SHOW HANDS';
   }
-  function gestureLoop() { if (!tracker) return; gestureRaf = requestAnimationFrame(gestureLoop); if (video.readyState >= 2) processHands(tracker.detectForVideo(video, performance.now()).landmarks); }
+  // Only run the (expensive) model when the webcam actually has a new frame.
+  function gestureLoop() {
+    if (!tracker) return;
+    gestureRaf = requestAnimationFrame(gestureLoop);
+    if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+      lastVideoTime = video.currentTime;
+      const result = tracker.detectForVideo(video, performance.now());
+      if (result && result.landmarks) processHands(result.landmarks);
+    }
+  }
 
   gestureToggle?.addEventListener('click', () => tracker ? stopGestures() : startGestures());
   document.getElementById('orb-zoom-in')?.addEventListener('click', () => zoomBy(0.72));
