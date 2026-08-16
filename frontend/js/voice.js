@@ -891,7 +891,7 @@ function requestCharacterShift(char) {
 
 async function checkAdminStatus() {
   try {
-    const resp = await fetch(`${API_BASE}/api/auth/status`);
+    const resp = await fetch(`${API_BASE}/api/auth/status`, { credentials: 'include' });
     if (resp.ok) {
       const data = await resp.json();
       if (data.access_mode === 'ADMIN') {
@@ -921,7 +921,8 @@ async function performAdminLogin() {
     const resp = await fetch(`${API_BASE}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ passcode })
+      body: JSON.stringify({ passcode }),
+      credentials: 'include'
     });
 
     if (resp.ok) {
@@ -941,14 +942,26 @@ async function performAdminLogin() {
         adminLoginError.classList.add('hidden');
         adminPasscodeInput.value = '';
 
+        // Preselect Atlas so the reconnecting WebSocket requests it directly.
+        // The session cookie is now stored (credentials: 'include'), so the
+        // backend will accept the admin-only character on this connection.
+        selectedCharacter = 'atlas';
+        selectedVoice = 'Charon';
+        if (voiceSelect) voiceSelect.value = 'Charon';
+        document.body.classList.remove('persona-nova');
+        document.body.classList.add('persona-atlas');
+        ['addy', 'nova', 'atlas'].forEach(c => {
+          const el = document.getElementById(`btn-char-${c}`);
+          if (el) el.classList.toggle('active', c === 'atlas');
+        });
+        const nameEl = document.getElementById('active-char-name');
+        if (nameEl) nameEl.textContent = 'Atlas';
+
         // Reconnect WS to pick up the new authenticated cookie for Admin access mode
         if (ws) {
           ws.close();
         }
         setTimeout(() => connectWebSocket(), 100);
-
-        // Switch to Atlas automatically once connected
-        setTimeout(() => requestCharacterShift('atlas'), 1000);
       }
     } else {
       const errData = await resp.json();
@@ -964,7 +977,7 @@ async function performAdminLogin() {
 
 async function logoutAdmin() {
   try {
-    const resp = await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST' });
+    const resp = await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' });
     if (resp.ok) {
       isAdminAuthenticated = false;
       adminToggleBtn.classList.remove('authenticated');
@@ -975,14 +988,25 @@ async function logoutAdmin() {
       const atlasBtn = document.getElementById('btn-char-atlas');
       if (atlasBtn) atlasBtn.setAttribute('hidden', '');
 
+      // Drop back to Addy before reconnecting (Atlas is admin-only)
+      if (selectedCharacter === 'atlas') {
+        selectedCharacter = 'addy';
+        selectedVoice = 'Aoede';
+        if (voiceSelect) voiceSelect.value = 'Aoede';
+        document.body.classList.remove('persona-atlas');
+        ['addy', 'nova', 'atlas'].forEach(c => {
+          const el = document.getElementById(`btn-char-${c}`);
+          if (el) el.classList.toggle('active', c === 'addy');
+        });
+        const nameEl = document.getElementById('active-char-name');
+        if (nameEl) nameEl.textContent = 'Addy';
+      }
+
       // Reconnect WS to drop Admin access mode
       if (ws) {
         ws.close();
       }
       setTimeout(() => connectWebSocket(), 100);
-
-      // Fallback to Addy
-      setTimeout(() => requestCharacterShift('addy'), 1000);
     }
   } catch (err) {
     console.error('Logout error:', err);
