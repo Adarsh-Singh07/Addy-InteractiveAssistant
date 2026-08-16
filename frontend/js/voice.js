@@ -120,6 +120,15 @@ const latencyTts    = document.getElementById('latency-tts');
 
 let currentAssistantBubble = null;
 
+// Public read-only bridge for the independent Three.js visualizer.
+window.getAddyVisualState = () => ({
+  state: agentState,
+  character: selectedCharacter,
+  isListening,
+  micAnalyser,
+  playbackVolume: window.audioPlayer ? window.audioPlayer.getPlaybackVolume() : 0,
+});
+
 // ── Initialize App ───────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupEventListeners();
@@ -127,7 +136,6 @@ document.addEventListener('DOMContentLoaded', () => {
   checkAdminStatus().then(() => {
     connectWebSocket();
   });
-  startOrbAnimation();
 });
 
 
@@ -802,128 +810,16 @@ function sendSettingsUpdate() {
 }
 
 // ── Visualizer Animation Loop ────────────────────────────────────────────────
-
-function startOrbAnimation() {
-  const canvas = document.getElementById('orb-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-
-  function render() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const cx = canvas.width / 2;
-    const cy = canvas.height / 2;
-
-    // Calculate real mic volume
-    let micVolume = 0;
-    if (micAnalyser && isListening) {
-      const dataArray = new Uint8Array(micAnalyser.frequencyBinCount);
-      micAnalyser.getByteTimeDomainData(dataArray);
-      let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) {
-        const v = (dataArray[i] - 128) / 128;
-        sum += v * v;
-      }
-      micVolume = Math.sqrt(sum / dataArray.length);
-    }
-
-    // Calculate real playback volume
-    const playbackVolume = window.audioPlayer ? window.audioPlayer.getPlaybackVolume() : 0;
-    const time = Date.now() * 0.003;
-
-    let baseRadius = 45;
-    let centerColor = '#6c8ef4';
-    let glowColor = 'rgba(108, 142, 244, 0.35)';
-
-    // Dynamic character colors
-    if (selectedCharacter === 'addy') {
-      centerColor = '#00e5ff';
-      glowColor = 'rgba(0, 229, 255, 0.35)';
-    } else if (selectedCharacter === 'nova') {
-      centerColor = '#8b5cf6';
-      glowColor = 'rgba(139, 92, 246, 0.35)';
-    } else if (selectedCharacter === 'atlas') {
-      centerColor = '#f59e0b';
-      glowColor = 'rgba(245, 158, 11, 0.35)';
-    }
-
-    if (agentState === 'listening') {
-      baseRadius = 45 + micVolume * 140;
-      if (selectedCharacter === 'addy') {
-        glowColor = `rgba(0, 229, 255, ${0.3 + micVolume * 0.7})`;
-      } else if (selectedCharacter === 'nova') {
-        glowColor = `rgba(139, 92, 246, ${0.3 + micVolume * 0.7})`;
-      } else {
-        glowColor = `rgba(245, 158, 11, ${0.3 + micVolume * 0.7})`;
-      }
-    } else if (agentState === 'thinking') {
-      baseRadius = 50 + Math.sin(time * 2.5) * 4;
-      if (selectedCharacter === 'addy') {
-        glowColor = 'rgba(0, 229, 255, 0.45)';
-      } else if (selectedCharacter === 'nova') {
-        glowColor = 'rgba(139, 92, 246, 0.45)';
-      } else {
-        glowColor = 'rgba(245, 158, 11, 0.45)';
-      }
-    } else if (agentState === 'speaking') {
-      baseRadius = 52 + playbackVolume * 160;
-      if (selectedCharacter === 'addy') {
-        glowColor = `rgba(0, 229, 255, ${0.4 + playbackVolume * 0.6})`;
-      } else if (selectedCharacter === 'nova') {
-        glowColor = `rgba(139, 92, 246, ${0.4 + playbackVolume * 0.6})`;
-      } else {
-        glowColor = `rgba(245, 158, 11, ${0.4 + playbackVolume * 0.6})`;
-      }
-    } else if (agentState === 'interrupted') {
-      baseRadius = 15;
-      glowColor = 'rgba(239, 68, 68, 0.2)';
-      centerColor = '#ef4444';
-    } else {
-      // idle
-      baseRadius = 45 + Math.sin(time) * 3;
-    }
-
-
-    // Outer glow ring
-    const grad = ctx.createRadialGradient(cx, cy, baseRadius * 0.4, cx, cy, baseRadius * 2);
-    grad.addColorStop(0, centerColor);
-    grad.addColorStop(0.3, glowColor);
-    grad.addColorStop(1, 'transparent');
-
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, baseRadius * 2, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Solid inner core
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(cx, cy, baseRadius * 0.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Visual effect rings for thinking/speaking states
-    if (agentState === 'thinking' || agentState === 'speaking') {
-      ctx.strokeStyle = centerColor;
-      ctx.lineWidth = 2.5;
-
-      ctx.beginPath();
-      ctx.arc(cx, cy, baseRadius * 0.85, time, time + Math.PI * 0.6);
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(cx, cy, baseRadius * 1.05, -time * 1.4, -time * 1.4 + Math.PI * 0.5);
-      ctx.stroke();
-    }
-
-    animFrameId = requestAnimationFrame(render);
-  }
-
-  render();
-}
+// NOTE: The live visualizer now runs from js/orb.js (Three.js WebGL module).
+// This legacy Canvas 2D loop was removed to avoid a second, conflicting renderer.
 
 // ── Helper Utilities ─────────────────────────────────────────────────────────
 
 function setStatus(state, label) {
   agentState = state;
+  window.dispatchEvent(new CustomEvent('addy:statechange', {
+    detail: { state, character: selectedCharacter, label }
+  }));
   const engineSuffix = selectedEngine === 'gemini_live' ? ' (Gemini Live)' : ' (Deepgram)';
 
   if (state === 'listening' || state === 'thinking' || state === 'speaking') {

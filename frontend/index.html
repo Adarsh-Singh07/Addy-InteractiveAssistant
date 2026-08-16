@@ -25,16 +25,28 @@
 <!-- Main voice interface -->
 <main class="voice-main" role="main">
 
-  <!-- Central orb visualizer -->
-  <div class="orb-container">
-    <div class="orb-glow" id="orb-glow"></div>
-    <div class="orb-rings" aria-hidden="true">
-      <div class="ring ring-1"></div>
-      <div class="ring ring-2"></div>
-      <div class="ring ring-3"></div>
+  <!-- Interactive holographic orb: drag/scroll or enable hand gestures -->
+  <section class="orb-shell" aria-label="Interactive AI core">
+    <div class="orb-container" id="orb-stage" aria-hidden="true"></div>
+    <!-- Static fallback visible by default; hidden only once the WebGL orb boots.
+         Guarantees a visible core even if modules/CDN fail to load. -->
+    <div class="orb-fallback" id="orb-fallback">
+      <div class="orb-fallback-core"></div>
     </div>
-    <canvas id="orb-canvas" width="500" height="500" aria-hidden="true"></canvas>
-  </div>
+    <div class="orb-fallback-error" id="orb-error" role="alert" hidden></div>
+    <div class="orb-reticle" aria-hidden="true">
+      <span class="reticle-corner corner-tl"></span>
+      <span class="reticle-corner corner-tr"></span>
+      <span class="reticle-corner corner-bl"></span>
+      <span class="reticle-corner corner-br"></span>
+    </div>
+    <div class="orb-telemetry telemetry-left" aria-hidden="true">
+      <span>NEURAL CORE</span><strong id="core-state-label">STANDBY</strong>
+    </div>
+    <div class="orb-telemetry telemetry-right" aria-hidden="true">
+      <span>VOICE LINK</span><strong id="voice-link-label">SYNCING</strong>
+    </div>
+  </section>
 
   <!-- Character identity -->
   <div class="char-identity">
@@ -68,6 +80,23 @@
     <button id="btn-interrupt" class="ctrl-chip" aria-label="Interrupt">✋ Stop</button>
     <button id="btn-clear" class="ctrl-chip danger" aria-label="Clear conversation">🗑️ Clear</button>
   </div>
+
+  <!-- Gesture and view controls -->
+  <section class="gesture-console" aria-label="Orb controls">
+    <div id="gesture-preview" class="gesture-preview" hidden>
+      <video id="gesture-video" muted playsinline></video>
+      <canvas id="gesture-overlay" width="224" height="168"></canvas>
+      <div id="gesture-status" class="gesture-status">SHOW HANDS</div>
+    </div>
+    <div id="gesture-error" class="gesture-error" role="alert" hidden></div>
+    <div class="gesture-actions">
+      <button id="gesture-toggle" class="hud-btn" type="button" aria-pressed="false">GESTURES OFF</button>
+      <button id="orb-zoom-in" class="hud-btn icon-btn" type="button" aria-label="Zoom in">+</button>
+      <button id="orb-zoom-out" class="hud-btn icon-btn" type="button" aria-label="Zoom out">−</button>
+      <button id="orb-reset" class="hud-btn" type="button">RESET</button>
+    </div>
+    <p class="gesture-hint"><kbd>G</kbd> gestures · <kbd>R</kbd> reset · pinch + move to spin · pinch both hands to zoom</p>
+  </section>
 
   <!-- Live transcript overlay -->
   <div class="transcript-area">
@@ -171,6 +200,14 @@
 <script src="js/config.js"></script>
 <script src="js/audio.js"></script>
 <script src="js/voice.js"></script>
-<script src="js/orb.js"></script>
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
+    }
+  }
+</script>
+<script type="module" src="js/orb.js"></script>
 </body>
 </html>
